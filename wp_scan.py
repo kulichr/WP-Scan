@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-wp_scan.py - Detekce WordPressu a jeho verze na zadané URL.
+wp_scan.py - Detect WordPress and its version on a given URL.
 
-Použití:
+Usage:
     python wp_scan.py https://example.com
     python wp_scan.py example.com --timeout 15 --json
     python wp_scan.py -f urls.txt
 
-Skript používá pouze pasivní a běžně dostupné indikátory (meta generator,
-readme.html, RSS feed, REST API, přítomnost wp-* cest). Nic neexploituje.
-Používejte pouze na cílech, které vlastníte nebo máte povolení testovat.
+The script uses only passive, commonly available indicators (meta generator,
+readme.html, RSS feed, REST API, presence of wp-* paths). It exploits nothing.
+Use it only against targets you own or have permission to test.
 """
 
 import argparse
@@ -26,9 +26,9 @@ try:
     from urllib3.util.retry import Retry
     import urllib3
 except ImportError:
-    sys.exit("Chybí knihovna 'requests'. Nainstalujte: pip install requests")
+    sys.exit("Missing 'requests' library. Install with: pip install requests")
 
-# Vypneme varování o neověřeném certifikátu (scanujeme i self-signed weby).
+# Silence warnings about unverified certificates (we also scan self-signed sites).
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 USER_AGENT = (
@@ -36,15 +36,15 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-# Regexy pro nalezení verze v různých zdrojích.
+# Regexes for finding the version in various sources.
 VERSION_PATTERNS = [
     re.compile(r'name=["\']generator["\']\s+content=["\']WordPress\s+([\d.]+)', re.I),
     re.compile(r'<generator>\s*https?://wordpress\.org/\?v=([\d.]+)', re.I),
     re.compile(r'Version\s+([\d.]+)', re.I),          # readme.html
-    re.compile(r'\?ver=([\d.]+)', re.I),              # asset query stringy (méně spolehlivé)
+    re.compile(r'\?ver=([\d.]+)', re.I),              # asset query strings (less reliable)
 ]
 
-# Obecné indikátory, že jde o WordPress (nezávisle na verzi).
+# General indicators that this is WordPress (regardless of version).
 WP_INDICATORS = [
     "wp-content", "wp-includes", "wp-json", "w/wp-login.php",
     'name="generator" content="WordPress',
@@ -70,7 +70,7 @@ def build_session(timeout: int) -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-    session.request_timeout = timeout  # uložíme si pro pohodlí
+    session.request_timeout = timeout  # kept around for convenience
     return session
 
 
@@ -101,10 +101,10 @@ def scan(url: str, timeout: int = 10) -> ScanResult:
     session = build_session(timeout)
     result = ScanResult(url=url)
 
-    # 1) Hlavní stránka - meta generator + obecné indikátory.
+    # 1) Home page - meta generator + general indicators.
     home = fetch(session, url, timeout)
     if home is None:
-        result.error = "Cíl je nedostupný (timeout / DNS / connection error)."
+        result.error = "Target is unreachable (timeout / DNS / connection error)."
         return result
 
     body = home.text
@@ -117,7 +117,7 @@ def scan(url: str, timeout: int = 10) -> ScanResult:
     if ver:
         result.version, result.version_source = ver, "homepage meta generator"
 
-    # 2) Zdroje, které často verzi obsahují (v pořadí spolehlivosti).
+    # 2) Sources that often contain the version (ordered by reliability).
     probes = [
         ("readme.html", "readme.html"),
         ("feed/", "RSS feed generator"),
@@ -125,32 +125,32 @@ def scan(url: str, timeout: int = 10) -> ScanResult:
         ("wp-json/", "REST API"),
     ]
     for path, source in probes:
-        # Pokud už máme spolehlivou verzi z generatoru, další zdroje jen potvrzují.
+        # If we already have a reliable version from the generator, other sources just confirm it.
         resp = fetch(session, urljoin(url, path), timeout)
         if resp is None or resp.status_code >= 400:
             continue
 
         text = resp.text
-        # REST API root jasně prozradí WP i bez verze.
+        # The REST API root clearly reveals WP even without a version.
         if path == "wp-json/" and ("wp/v2" in text or "\"namespaces\"" in text):
             result.is_wordpress = True
-            result.indicators.append("REST API /wp-json/ dostupné")
+            result.indicators.append("REST API /wp-json/ available")
 
         if not result.version:
             v = extract_version(text)
             if v:
                 result.version, result.version_source = v, source
                 result.is_wordpress = True
-                result.indicators.append(f"{path}: nalezena verze")
+                result.indicators.append(f"{path}: version found")
 
-    # 3) Ověření existence typických WP cest (jen HEAD/GET status).
+    # 3) Check for the existence of typical WP paths (status code only).
     for path in ("wp-login.php", "wp-admin/", "wp-content/"):
         resp = fetch(session, urljoin(url, path), timeout)
         if resp is not None and resp.status_code < 400:
             result.is_wordpress = True
-            result.indicators.append(f"cesta dostupná: /{path}")
+            result.indicators.append(f"path available: /{path}")
 
-    # 4) Stanovení míry jistoty.
+    # 4) Determine confidence level.
     if result.version:
         result.confidence = "high"
         result.is_wordpress = True
@@ -165,19 +165,19 @@ def scan(url: str, timeout: int = 10) -> ScanResult:
 def print_human(r: ScanResult) -> None:
     line = "=" * 60
     print(line)
-    print(f"Cíl: {r.url}")
+    print(f"Target: {r.url}")
     if r.error:
         print(f"  [!] {r.error}")
         print(line)
         return
-    print(f"  WordPress:  {'ANO' if r.is_wordpress else 'ne / nedetekováno'}")
+    print(f"  WordPress:  {'YES' if r.is_wordpress else 'no / not detected'}")
     if r.version:
-        print(f"  Verze:      {r.version}  (zdroj: {r.version_source})")
+        print(f"  Version:    {r.version}  (source: {r.version_source})")
     elif r.is_wordpress:
-        print("  Verze:      nezjištěna (skrytá nebo odstraněný generator)")
-    print(f"  Jistota:    {r.confidence}")
+        print("  Version:    not determined (hidden or generator removed)")
+    print(f"  Confidence: {r.confidence}")
     if r.indicators:
-        print("  Indikátory:")
+        print("  Indicators:")
         for ind in r.indicators:
             print(f"    - {ind}")
     print(line)
@@ -185,16 +185,16 @@ def print_human(r: ScanResult) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Detekce WordPressu a jeho verze na zadané URL.")
-    parser.add_argument("url", nargs="?", help="cílová URL (např. example.com)")
+        description="Detect WordPress and its version on a given URL.")
+    parser.add_argument("url", nargs="?", help="target URL (e.g. example.com)")
     parser.add_argument("-f", "--file",
-                        help="soubor se seznamem URL (jedna na řádek)")
+                        help="file with a list of URLs (one per line)")
     parser.add_argument("-t", "--timeout", type=int, default=10,
-                        help="timeout v sekundách (výchozí 10)")
+                        help="timeout in seconds (default 10)")
     parser.add_argument("-w", "--workers", type=int, default=5,
-                        help="počet paralelních vláken při -f (výchozí 5)")
+                        help="number of parallel threads with -f (default 5)")
     parser.add_argument("--json", action="store_true",
-                        help="výstup ve formátu JSON")
+                        help="output in JSON format")
     args = parser.parse_args()
 
     targets: list[str] = []
@@ -204,11 +204,11 @@ def main() -> None:
                 targets = [ln.strip() for ln in fh if ln.strip()
                            and not ln.startswith("#")]
         except OSError as e:
-            sys.exit(f"Nelze číst soubor: {e}")
+            sys.exit(f"Cannot read file: {e}")
     elif args.url:
         targets = [args.url]
     else:
-        parser.error("Zadejte URL nebo použijte -f soubor.")
+        parser.error("Provide a URL or use -f file.")
 
     results: list[ScanResult] = []
     if len(targets) == 1:
